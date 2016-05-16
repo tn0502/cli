@@ -53,6 +53,8 @@ namespace Microsoft.DotNet.Tools.Build
         {
         }
 
+        protected abstract void AfterCompile(ProjectGraphNode projectNode, CompilationResult result);
+
         protected abstract CompilationResult RunCompile(ProjectGraphNode projectNode);
 
         private CompilationResult Build(ProjectGraphNode projectNode)
@@ -71,49 +73,63 @@ namespace Microsoft.DotNet.Tools.Build
 
         private CompilationResult CompileWithDependencies(ProjectGraphNode projectNode)
         {
+            CompilationResult? result = null;
+
             if (!_skipDependencies)
             {
                 foreach (var dependency in projectNode.Dependencies)
                 {
-                    var result = Build(dependency);
-                    if (result == CompilationResult.Failure)
+                    var dependencyResult = Build(dependency);
+                    if (dependencyResult == CompilationResult.Failure)
                     {
-                        return CompilationResult.Failure;
+                        result =  CompilationResult.Failure;
                     }
                 }
             }
 
-            var context = projectNode.ProjectContext;
-            using (PerfTrace.Current.CaptureTiming($"{projectNode.ProjectContext.ProjectName()}", nameof(HasSourceFiles)))
+            if (result == null)
             {
-                if (!HasSourceFiles(context))
+                var context = projectNode.ProjectContext;
+                using (
+                    PerfTrace.Current.CaptureTiming($"{projectNode.ProjectContext.ProjectName()}",
+                        nameof(HasSourceFiles)))
                 {
-                    return CompilationResult.IncrementalSkip;
+                    if (!HasSourceFiles(context))
+                    {
+                        result = CompilationResult.IncrementalSkip;
+                    }
                 }
             }
 
-            bool needsRebuilding;
-            using (PerfTrace.Current.CaptureTiming($"{projectNode.ProjectContext.ProjectName()}", nameof(NeedsRebuilding)))
+            if (result == null)
             {
-                needsRebuilding = NeedsRebuilding(projectNode);
+                bool needsRebuilding;
+                using (PerfTrace.Current.CaptureTiming($"{projectNode.ProjectContext.ProjectName()}", nameof(NeedsRebuilding)))
+                {
+                    needsRebuilding = NeedsRebuilding(projectNode);
+                }
+
+                if (needsRebuilding)
+                {
+                    using (PerfTrace.Current.CaptureTiming($"{projectNode.ProjectContext.ProjectName()}",nameof(RunCompile)))
+                    {
+                        result = RunCompile(projectNode);
+                    }
+                }
+                else
+                {
+                    using (PerfTrace.Current.CaptureTiming($"{projectNode.ProjectContext.ProjectName()}", nameof(ProjectSkiped)))
+                    {
+                        ProjectSkiped(projectNode);
+                    }
+                    result = CompilationResult.IncrementalSkip;
+                }
             }
 
-            if (needsRebuilding)
-            {
-                using (PerfTrace.Current.CaptureTiming($"{projectNode.ProjectContext.ProjectName()}",nameof(RunCompile)))
-                {
-                    return RunCompile(projectNode);
-                }
-            }
-            else
-            {
-                using (PerfTrace.Current.CaptureTiming($"{projectNode.ProjectContext.ProjectName()}", nameof(ProjectSkiped)))
-                {
-                    ProjectSkiped(projectNode);
-                }
-                return CompilationResult.IncrementalSkip;
-            }
+            AfterCompile(projectNode, result.Value);
+            return result.Value;
         }
+
 
         private static bool HasSourceFiles(ProjectContext context)
         {
